@@ -1,5 +1,6 @@
 {
     "files.associations": {
         "user.h": "c"
-    }
+    },
+    "cmake.sourceDirectory": "${workspaceFolder}/user-land-filesystem/fs/newfs"
 }
