@@ -8,6 +8,7 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+struct stats;
 #ifdef LAB_NET
 struct mbuf;
 struct sock;
@@ -108,6 +109,7 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+void            proc_freeKpagetable(pagetable_t pagetable);
 
 // swtch.S
 void            swtch(struct context*, struct context*);
@@ -179,6 +181,17 @@ int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 int             test_pagetable();
+void            vmprint(pagetable_t pagetable);
+void            pageprint(pagetable_t pagetable,int rank);
+pagetable_t     my_kvminit(void);
+void            my_kvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm);
+void            U_K_pageTrans(pagetable_t pagetable_U,pagetable_t pagetable_K,uint64 begin,uint64 end);
+void            U_K_pageDel(pagetable_t pagetable_U,pagetable_t pagetable_K,uint64 begin,uint64 end);
+
+//vmcopyin.c
+int statscopyin(char *buf, int sz);
+int copyin_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len);
+int copyinstr_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max);
 
 // plic.c
 void            plicinit(void);

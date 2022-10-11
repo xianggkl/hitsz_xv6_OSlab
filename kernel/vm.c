@@ -379,7 +379,9 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 // Return 0 on success, -1 on error.
 int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
-{
+{ 
+  //使用copyin_new
+  return copyin_new(pagetable,dst,srcva,len);
   uint64 n, va0, pa0;
 
   while(len > 0){
@@ -406,6 +408,8 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 int
 copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
+  //使用copyinstr_new
+  return copyinstr_new(pagetable,dst,srcva,max);
   uint64 n, va0, pa0;
   int got_null = 0;
 
@@ -449,4 +453,124 @@ test_pagetable()
   uint64 satp = r_satp();
   uint64 gsatp = MAKE_SATP(kernel_pagetable);
   return satp != gsatp;
+}
+
+
+void
+vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n",pagetable);
+  pageprint(pagetable,1);
+}
+
+void
+pageprint(pagetable_t pagetable,int rank)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++)
+  {
+    //得到当前页表的页表项
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      //符合这些条件的都是页目录
+      //先通过页表项得到下一个页表的基地址
+      uint64 child = PTE2PA(pte);
+
+      if(rank == 1){
+        //即当前是第一级页表
+        printf("||%d: pte %p pa %p\n",i,pte,child);
+      }
+      else if (rank == 2){
+        //即当前是第二级页表
+        printf("|| ||%d: pte %p pa %p\n",i,pte,child);
+      }
+      else if (rank == 3){
+        //即当前是第三级页表
+        printf("|| || ||%d: pte %p pa %p\n",i,pte,child);
+      }
+
+      pageprint((pagetable_t)child,rank+1);
+    } 
+    else if(pte & PTE_V)
+    {
+      //符合这些条件的是真正的页表（存储物理地址页号）
+      uint64 pa = PTE2PA(pte);
+      if (rank == 3){
+        //即当前是第三级页表(真正的页表)
+        printf("|| || ||%d: pte %p pa %p\n",i,pte,pa);
+      }
+    }
+  }
+}
+
+pagetable_t
+my_kvminit()
+{
+  pagetable_t pagetable = (pagetable_t) kalloc();
+  memset(pagetable, 0, PGSIZE);
+
+  // uart registers
+  my_kvmmap(pagetable, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+
+  // virtio mmio disk interface
+  my_kvmmap(pagetable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+  // CLINT (先不映射CLINT)
+  // my_kvmmap(pagetable, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+
+  // PLIC
+  my_kvmmap(pagetable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  // map kernel text executable and read-only.
+  my_kvmmap(pagetable, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+
+  // map kernel data and the physical RAM we'll make use of.
+  my_kvmmap(pagetable, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+
+  // map the trampoline for trap entry/exit to
+  // the highest virtual address in the kernel.
+  my_kvmmap(pagetable, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+  return pagetable;
+}
+
+void
+my_kvmmap(pagetable_t pagetable, uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if(mappages(pagetable, va, sz, pa, perm) != 0)
+    panic("my_kvmmap");
+}
+
+
+/// @brief 这个函数主要在更改用户页表之后调用，用来将用户页表和内核页表同步 (在用户页表增加时)
+/// @param pagetable_U 
+/// @param pagetable_K 
+/// @param begin 
+/// @param end 
+void 
+U_K_pageTrans(pagetable_t pagetable_U,pagetable_t pagetable_K,uint64 begin,uint64 end)
+{
+  //内核页表直接共享用户页表的叶子页表
+  //就是说直接将次页表对应的页表项的左侧 赋值为用户叶子页表的基地址
+  //页表回收时需要避免重复回收
+  for (uint64 i=begin;i<end;i=i+PGSIZE){
+    //使用walk这个函数，可以直接得到最近的那个页表项，所以也可能有一部分内核页表直接共享用户页表的次表项
+    pte_t* u_pagetable_pte = walk(pagetable_U,i,1);
+    pte_t* k_pagetable_pte = walk(pagetable_K,i,1);
+    //直接将U位设置为全零
+    *k_pagetable_pte = (*u_pagetable_pte) & (~PTE_U);
+  }
+}
+
+/// @brief 这个函数主要在更改用户页表之后调用，用来将用户页表和内核页表同步 (在用户页表减少时)
+/// @param pagetable_U 
+/// @param pagetable_K 
+/// @param begin 
+/// @param end 
+void 
+U_K_pageDel(pagetable_t pagetable_U,pagetable_t pagetable_K,uint64 begin,uint64 end)
+{
+  for (uint64 i=begin;i<end;i=i+PGSIZE){
+    pte_t* k_pagetable_pte = walk(pagetable_K,i,0);
+    *k_pagetable_pte = 0;
+  }
 }

@@ -40,6 +40,8 @@ procinit(void)
       uint64 va = KSTACK((int) (p - proc));
       kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
       p->kstack = va;
+      //将内核栈的物理地址复制到PCB的kstack_pa中
+      p->kstack_pa = (uint64)pa;
   }
   kvminithart();
 }
@@ -127,6 +129,14 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // 设置进程的独立的内核页表,并且将新建的内核栈映射到PCB的k_pagetable
+  p->k_pagetable = my_kvminit();
+  if(p->k_pagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  my_kvmmap(p->k_pagetable,p->kstack,p->kstack_pa,PGSIZE,PTE_R | PTE_W);
   return p;
 }
 
@@ -141,6 +151,9 @@ freeproc(struct proc *p)
   p->trapframe = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+  if(p->k_pagetable)
+    proc_freeKpagetable(p->k_pagetable);
+  p->k_pagetable = 0;
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -195,6 +208,24 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmfree(pagetable, sz);
 }
 
+void 
+proc_freeKpagetable(pagetable_t pagetable)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      // this PTE points to a lower-level page table.
+      pagetable[i] = 0;  
+      uint64 child = PTE2PA(pte);
+      proc_freeKpagetable((pagetable_t)child);
+    } else if(pte & PTE_V){
+      pagetable[i] = 0;
+    }
+  }
+  kfree((void*)pagetable);
+}
+
 // a user program that calls exec("/init")
 // od -t xC initcode
 uchar initcode[] = {
@@ -221,6 +252,9 @@ userinit(void)
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  //同步内核页表
+  U_K_pageTrans(p->pagetable,p->k_pagetable,0,p->sz);
+
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -246,8 +280,12 @@ growproc(int n)
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    //同步内核页表
+    U_K_pageTrans(p->pagetable,p->k_pagetable,p->sz,(p->sz+n));
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    //同步内核页表
+    U_K_pageDel(p->pagetable,p->k_pagetable,p->sz,(p->sz+n));
   }
   p->sz = sz;
   return 0;
@@ -274,6 +312,9 @@ fork(void)
     return -1;
   }
   np->sz = p->sz;
+
+  //同步内核页表
+  U_K_pageTrans(np->pagetable,np->k_pagetable,0,np->sz);
 
   np->parent = p;
 
@@ -473,11 +514,17 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        //切换到进程的内核页表
+        w_satp(MAKE_SATP(p->k_pagetable));
+        sfence_vma();
+
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0; // cpu dosen't run any process now
+        kvminithart();//此时切换到全局内核页表
 
         found = 1;
       }
